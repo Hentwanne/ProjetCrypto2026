@@ -1,17 +1,27 @@
+
 public class ServerInterceptor {
+
     public ServerInterceptor() {
         System.out.println("[Server] MITM attack mode");
     }
 
     public String onMessageRelay(String message, int fromClient, int toClient) {
 
-        // Déchiffrement ROT13 (attaque)
-        String clear = rot13(message);
+        System.out.println("[MITM] Intercepted: " + message);
 
-        System.out.println("[MITM] Intercepted message from " 
-            + fromClient + " to " + toClient + " : " + clear);
+        // Attaque : modifier le message
+        if (message.length() > 10) {
+            char[] chars = message.toCharArray();
 
-        // On laisse passer le message inchangé
+            // on modifie un caractère au milieu
+            chars[10] = (chars[10] == 'A') ? 'B' : 'A';
+
+            String modified = new String(chars);
+
+            System.out.println("[MITM] Modified message!");
+            return modified;
+        }
+
         return message;
     }
 

@@ -1,3 +1,4 @@
+
 import java.io.*;
 import java.security.*;
 import java.util.Arrays;
@@ -40,20 +41,18 @@ public class Interceptor {
         try {
             System.out.println("[Interceptor] Encrypting message: " + plainText);
 
-            // Générer IV aléatoire
-            byte[] iv = new byte[16];
+            // IV aléatoire de 12 octets recommandé pour GCM
+            byte[] iv = new byte[12];
             SecureRandom random = new SecureRandom();
             random.nextBytes(iv);
-            IvParameterSpec ivSpec = new IvParameterSpec(iv);
 
-            // Initialiser cipher
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, aesKey, ivSpec);
+            GCMParameterSpec gcmSpec = new GCMParameterSpec(128, iv);
 
-            // Chiffrement
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, aesKey, gcmSpec);
+
             byte[] encrypted = cipher.doFinal(plainText.getBytes("UTF-8"));
 
-            // Encodage Base64
             String ivBase64 = Base64.getEncoder().encodeToString(iv);
             String cipherBase64 = Base64.getEncoder().encodeToString(encrypted);
 
@@ -65,28 +64,26 @@ public class Interceptor {
     }
 
     public String afterReceive(String encryptedText) {
-        try {
-            System.out.println("[Interceptor] Decrypting message...");
+    try {
+        System.out.println("[Interceptor] Decrypting message...");
 
-            // Séparer IV et ciphertext
-            String[] parts = encryptedText.split(":");
-            byte[] iv = Base64.getDecoder().decode(parts[0]);
-            byte[] cipherBytes = Base64.getDecoder().decode(parts[1]);
+        String[] parts = encryptedText.split(":");
+        byte[] iv = Base64.getDecoder().decode(parts[0]);
+        byte[] cipherBytes = Base64.getDecoder().decode(parts[1]);
 
-            IvParameterSpec ivSpec = new IvParameterSpec(iv);
+        GCMParameterSpec gcmSpec = new GCMParameterSpec(128, iv);
 
-            // Déchiffrement
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, ivSpec);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, aesKey, gcmSpec);
 
-            byte[] decrypted = cipher.doFinal(cipherBytes);
+        byte[] decrypted = cipher.doFinal(cipherBytes);
 
-            return new String(decrypted, "UTF-8");
+        return new String(decrypted, "UTF-8");
 
-        } catch (Exception e) {
-            return "[Decryption failed: " + e.getMessage() + "]";
-        }
+    } catch (Exception e) {
+        return "[Decryption failed: message integrity check failed]";
     }
+}
 
     /**
      * ROT13 encoding/decoding (Caesar cipher with shift of 13) This is NOT
