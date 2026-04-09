@@ -4,6 +4,7 @@ import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Signature;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
@@ -14,8 +15,9 @@ import javax.crypto.spec.SecretKeySpec;
 
 public class ServerInterceptor {
 
-    private KeyPair mitmKeyPairForClient1;
-    private KeyPair mitmKeyPairForClient2;
+    private KeyPair mitmECDHForClient1;
+    private KeyPair mitmECDHForClient2;
+    private KeyPair mitmECDSA;
 
     private SecretKeySpec aesKeyWithClient1;
     private SecretKeySpec aesKeyWithClient2;
@@ -24,17 +26,15 @@ public class ServerInterceptor {
     private boolean client2HandshakeDone = false;
 
     public ServerInterceptor() {
-        System.out.println("[Server] MITM ECDH attack mode");
+        System.out.println("[Server] MITM signed-handshake attack mode");
 
         try {
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
-            kpg.initialize(256);
+            KeyPairGenerator ecGen = KeyPairGenerator.getInstance("EC");
+            ecGen.initialize(256);
 
-            // Paire utilisée pour parler à client 1
-            mitmKeyPairForClient1 = kpg.generateKeyPair();
-
-            // Paire utilisée pour parler à client 2
-            mitmKeyPairForClient2 = kpg.generateKeyPair();
+            mitmECDHForClient1 = ecGen.generateKeyPair();
+            mitmECDHForClient2 = ecGen.generateKeyPair();
+            mitmECDSA = ecGen.generateKeyPair();
 
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize MITM keys", e);
@@ -45,69 +45,73 @@ public class ServerInterceptor {
         try {
             System.out.println("[MITM] Intercepted from " + fromClient + " to " + toClient + ": " + message);
 
-            // Phase handshake : échange des clés publiques ECDH
-            if (isLikelyPublicKey(message)) {
-                return handleHandshakeMessage(message, fromClient, toClient);
+            if (isSignedHandshakeMessage(message)) {
+                return handleSignedHandshake(message, fromClient, toClient);
             }
 
-            // Phase messages chiffrés
             return handleEncryptedMessage(message, fromClient, toClient);
 
         } catch (Exception e) {
-            System.out.println("[MITM] Error during relay: " + e.getMessage());
+            System.out.println("[MITM] Error: " + e.getMessage());
             e.printStackTrace();
             return message;
         }
     }
 
-    private boolean isLikelyPublicKey(String message) {
-        // Simple heuristique suffisante ici :
-        // les clés publiques EC X.509 en Base64 sont longues et ne contiennent pas ':'
-        return !message.contains(":") && message.length() > 100;
+    private boolean isSignedHandshakeMessage(String message) {
+        String[] parts = message.split(":");
+        return parts.length == 3;
     }
 
-    private String handleHandshakeMessage(String message, int fromClient, int toClient) throws Exception {
-        System.out.println("[MITM] Intercepted ECDH public key from client " + fromClient);
+    private String handleSignedHandshake(String message, int fromClient, int toClient) throws Exception {
+        System.out.println("[MITM] Intercepted signed ECDH handshake from client " + fromClient);
 
-        byte[] clientPubBytes = Base64.getDecoder().decode(message);
+        String[] parts = message.split(":");
+        String clientECDHPubB64 = parts[0];
+        // parts[1] = signature du client
+        // parts[2] = clé publique ECDSA du client
+        // on les ignore volontairement pour l'attaque
+
+        byte[] clientECDHPubBytes = Base64.getDecoder().decode(clientECDHPubB64);
 
         KeyFactory kf = KeyFactory.getInstance("EC");
-        X509EncodedKeySpec keySpec = new X509EncodedKeySpec(clientPubBytes);
-        PublicKey clientPublicKey = kf.generatePublic(keySpec);
+        X509EncodedKeySpec ecdhSpec = new X509EncodedKeySpec(clientECDHPubBytes);
+        PublicKey clientECDHPublicKey = kf.generatePublic(ecdhSpec);
 
         if (fromClient == 1 && !client1HandshakeDone) {
-            // Le serveur calcule la clé partagée avec client 1
-            aesKeyWithClient1 = deriveAesKeyFromECDH(clientPublicKey, mitmKeyPairForClient1);
+            aesKeyWithClient1 = deriveAesKeyFromECDH(clientECDHPublicKey, mitmECDHForClient1);
             client1HandshakeDone = true;
-
             System.out.println("[MITM] Shared secret established with client 1");
 
-            // On envoie à client 2, à la place de la vraie clé de client 1,
-            // la clé publique MITM destinée à client 2
-            String fakePubForClient2 = Base64.getEncoder()
-                    .encodeToString(mitmKeyPairForClient2.getPublic().getEncoded());
-
-            System.out.println("[MITM] Replacing client 1 public key with MITM public key for client 2");
-            return fakePubForClient2;
+            return forgeHandshakeForClient(mitmECDHForClient2);
         }
 
         if (fromClient == 2 && !client2HandshakeDone) {
-            // Le serveur calcule la clé partagée avec client 2
-            aesKeyWithClient2 = deriveAesKeyFromECDH(clientPublicKey, mitmKeyPairForClient2);
+            aesKeyWithClient2 = deriveAesKeyFromECDH(clientECDHPublicKey, mitmECDHForClient2);
             client2HandshakeDone = true;
-
             System.out.println("[MITM] Shared secret established with client 2");
 
-            // On envoie à client 1, à la place de la vraie clé de client 2,
-            // la clé publique MITM destinée à client 1
-            String fakePubForClient1 = Base64.getEncoder()
-                    .encodeToString(mitmKeyPairForClient1.getPublic().getEncoded());
-
-            System.out.println("[MITM] Replacing client 2 public key with MITM public key for client 1");
-            return fakePubForClient1;
+            return forgeHandshakeForClient(mitmECDHForClient1);
         }
 
         return message;
+    }
+
+    private String forgeHandshakeForClient(KeyPair mitmECDHKeyPair) throws Exception {
+        byte[] ecdhPubBytes = mitmECDHKeyPair.getPublic().getEncoded();
+
+        Signature sig = Signature.getInstance("SHA256withECDSA");
+        sig.initSign(mitmECDSA.getPrivate());
+        sig.update(ecdhPubBytes);
+        byte[] signatureBytes = sig.sign();
+
+        String ecdhPubB64 = Base64.getEncoder().encodeToString(ecdhPubBytes);
+        String sigB64 = Base64.getEncoder().encodeToString(signatureBytes);
+        String ecdsaPubB64 = Base64.getEncoder().encodeToString(mitmECDSA.getPublic().getEncoded());
+
+        System.out.println("[MITM] Replacing ECDH public key + signature + ECDSA public key");
+
+        return ecdhPubB64 + ":" + sigB64 + ":" + ecdsaPubB64;
     }
 
     private SecretKeySpec deriveAesKeyFromECDH(PublicKey otherPublicKey, KeyPair myKeyPair) throws Exception {
@@ -118,7 +122,7 @@ public class ServerInterceptor {
 
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
         byte[] hash = sha.digest(sharedSecret);
-        byte[] keyBytes = Arrays.copyOf(hash, 16); // AES-128
+        byte[] keyBytes = Arrays.copyOf(hash, 16);
 
         return new SecretKeySpec(keyBytes, "AES");
     }

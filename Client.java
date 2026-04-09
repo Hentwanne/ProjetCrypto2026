@@ -13,15 +13,23 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client() {
-    this.interceptor = new Interceptor();
+    public Client(String privateKeyPath, String publicKeyPath) {
+    this.interceptor = new Interceptor(privateKeyPath, publicKeyPath);
     this.running = true;
 }
 
     public static void main(String[] args) {
     System.out.println("Starting client ...");
 
-    Client client = new Client();
+    if (args.length < 2) {
+        System.out.println("Usage: java Client <privateKeyFile> <publicKeyFile>");
+        return;
+    }
+
+    String privateKeyPath = args[0];
+    String publicKeyPath = args[1];
+
+    Client client = new Client(privateKeyPath, publicKeyPath);
     client.start();
 }
 
