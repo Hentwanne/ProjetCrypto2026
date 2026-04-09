@@ -13,21 +13,15 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client(String password) {
-    this.interceptor = new Interceptor(password);
+    public Client() {
+    this.interceptor = new Interceptor();
     this.running = true;
 }
 
     public static void main(String[] args) {
     System.out.println("Starting client ...");
 
-    if (args.length < 1) {
-        System.out.println("Usage: java Client <password>");
-        return;
-    }
-
-    String password = args[0];
-    Client client = new Client(password);
+    Client client = new Client();
     client.start();
 }
 
