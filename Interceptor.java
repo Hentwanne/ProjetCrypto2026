@@ -1,4 +1,3 @@
-
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -15,6 +14,9 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public class Interceptor {
+
+    private int sendCounter = 0;
+    private int receiveCounter = 0;
 
     private SecretKeySpec aesKey;
     private PrivateKey ecdsaPrivateKey;
@@ -34,8 +36,8 @@ public class Interceptor {
     private PrivateKey loadPrivateKey(String path) throws Exception {
         String pem = new String(Files.readAllBytes(Paths.get(path)));
         pem = pem.replace("-----BEGIN PRIVATE KEY-----", "")
-                .replace("-----END PRIVATE KEY-----", "")
-                .replaceAll("\\s", "");
+                 .replace("-----END PRIVATE KEY-----", "")
+                 .replaceAll("\\s", "");
 
         byte[] keyBytes = Base64.getDecoder().decode(pem);
 
@@ -137,7 +139,10 @@ public class Interceptor {
 
     public String beforeSend(String plainText) {
         try {
-            System.out.println("[Interceptor] Encrypting message: " + plainText);
+            sendCounter++;
+            String messageWithCounter = sendCounter + ":" + plainText;
+
+            System.out.println("[Interceptor] Encrypting message: " + messageWithCounter);
 
             byte[] iv = new byte[12];
             SecureRandom random = new SecureRandom();
@@ -148,7 +153,7 @@ public class Interceptor {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, aesKey, gcmSpec);
 
-            byte[] encrypted = cipher.doFinal(plainText.getBytes("UTF-8"));
+            byte[] encrypted = cipher.doFinal(messageWithCounter.getBytes("UTF-8"));
 
             String ivBase64 = Base64.getEncoder().encodeToString(iv);
             String cipherBase64 = Base64.getEncoder().encodeToString(encrypted);
@@ -164,18 +169,32 @@ public class Interceptor {
         try {
             System.out.println("[Interceptor] Decrypting message...");
 
-            String[] parts = encryptedText.split(":");
-            byte[] iv = Base64.getDecoder().decode(parts[0]);
-            byte[] cipherBytes = Base64.getDecoder().decode(parts[1]);
+            String[] encryptedParts = encryptedText.split(":", 2);
+            byte[] iv = Base64.getDecoder().decode(encryptedParts[0]);
+            byte[] cipherBytes = Base64.getDecoder().decode(encryptedParts[1]);
 
             GCMParameterSpec gcmSpec = new GCMParameterSpec(128, iv);
 
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, aesKey, gcmSpec);
 
-            byte[] decrypted = cipher.doFinal(cipherBytes);
+            byte[] decryptedBytes = cipher.doFinal(cipherBytes);
+            String decrypted = new String(decryptedBytes, "UTF-8");
 
-            return new String(decrypted, "UTF-8");
+            String[] messageParts = decrypted.split(":", 2);
+            if (messageParts.length != 2) {
+                return "[ALERTE : format de message invalide]";
+            }
+
+            int counter = Integer.parseInt(messageParts[0]);
+            String message = messageParts[1];
+
+            if (counter != receiveCounter + 1) {
+                return "[ALERTE : message rejoue ou manquant]";
+            }
+
+            receiveCounter = counter;
+            return message;
 
         } catch (Exception e) {
             return "[Decryption failed: message integrity check failed]";
