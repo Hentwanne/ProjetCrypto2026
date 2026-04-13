@@ -1,9 +1,10 @@
+
 import java.io.*;
 import java.net.*;
 import java.util.Scanner;
 
-
 public class Client {
+
     private static final String SERVER_HOST = "localhost";
     private static final int SERVER_PORT = 8888;
 
@@ -13,25 +14,22 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client(String privateKeyPath, String publicKeyPath) {
-    this.interceptor = new Interceptor(privateKeyPath, publicKeyPath);
-    this.running = true;
-}
-
-    public static void main(String[] args) {
-    System.out.println("Starting client ...");
-
-    if (args.length < 2) {
-        System.out.println("Usage: java Client <privateKeyFile> <publicKeyFile>");
-        return;
+    public Client(String privateKeyPath, String certificatePath, String caCertificatePath) {
+        this.interceptor = new Interceptor(privateKeyPath, certificatePath, caCertificatePath);
+        this.running = true;
     }
 
-    String privateKeyPath = args[0];
-    String publicKeyPath = args[1];
+    public static void main(String[] args) {
+        System.out.println("Starting client ...");
 
-    Client client = new Client(privateKeyPath, publicKeyPath);
-    client.start();
-}
+        if (args.length < 3) {
+            System.out.println("Usage: java Client <privateKeyFile> <certificateFile> <caCertificateFile>");
+            return;
+        }
+
+        Client client = new Client(args[0], args[1], args[2]);
+        client.start();
+    }
 
     public void start() {
         System.out.println("=== Crypto Chat Client ===");
@@ -44,7 +42,6 @@ public class Client {
             input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             output = new PrintWriter(socket.getOutputStream(), true);
 
-            // Wait for server's READY signal (sent when both clients are connected)
             System.out.println("Waiting for other client to connect...");
             String readySignal = input.readLine();
             if (!"READY".equals(readySignal)) {
@@ -66,8 +63,7 @@ public class Client {
             handleUserInput();
 
         } catch (IOException e) {
-            System.err.println("Connection error: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println(e.getMessage());
         } finally {
             cleanup();
         }
@@ -103,9 +99,15 @@ public class Client {
         running = false;
 
         try {
-            if (input != null) input.close();
-            if (output != null) output.close();
-            if (socket != null && !socket.isClosed()) socket.close();
+            if (input != null) {
+                input.close();
+            }
+            if (output != null) {
+                output.close();
+            }
+            if (socket != null && !socket.isClosed()) {
+                socket.close();
+            }
         } catch (IOException e) {
             System.err.println("Error during cleanup: " + e.getMessage());
         }
@@ -114,6 +116,7 @@ public class Client {
     }
 
     private class MessageReceiver implements Runnable {
+
         @Override
         public void run() {
             try {

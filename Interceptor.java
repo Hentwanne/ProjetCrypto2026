@@ -3,6 +3,8 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.*;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
@@ -16,14 +18,16 @@ public class Interceptor {
 
     private SecretKeySpec aesKey;
     private PrivateKey ecdsaPrivateKey;
-    private PublicKey ecdsaPublicKey;
+    private X509Certificate myCertificate;
+    private X509Certificate caCertificate;
 
-    public Interceptor(String privateKeyPath, String publicKeyPath) {
+    public Interceptor(String privateKeyPath, String certificatePath, String caCertificatePath) {
         try {
             this.ecdsaPrivateKey = loadPrivateKey(privateKeyPath);
-            this.ecdsaPublicKey = loadPublicKey(publicKeyPath);
+            this.myCertificate = loadCertificate(certificatePath);
+            this.caCertificate = loadCertificate(caCertificatePath);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to load ECDSA keys", e);
+            throw new RuntimeException("Failed to load keys/certificates", e);
         }
     }
 
@@ -31,107 +35,105 @@ public class Interceptor {
         String pem = new String(Files.readAllBytes(Paths.get(path)));
         pem = pem.replace("-----BEGIN PRIVATE KEY-----", "")
                 .replace("-----END PRIVATE KEY-----", "")
-                .replace("-----BEGIN EC PRIVATE KEY-----", "")
-                .replace("-----END EC PRIVATE KEY-----", "")
                 .replaceAll("\\s", "");
 
         byte[] keyBytes = Base64.getDecoder().decode(pem);
 
-        try {
-            PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(keyBytes);
-            KeyFactory kf = KeyFactory.getInstance("EC");
-            return kf.generatePrivate(spec);
-        } catch (Exception e) {
-            throw new RuntimeException("Unsupported private key format. Convert it to PKCS#8 with OpenSSL.", e);
-        }
+        PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(keyBytes);
+        KeyFactory kf = KeyFactory.getInstance("EC");
+        return kf.generatePrivate(spec);
     }
 
-    private PublicKey loadPublicKey(String path) throws Exception {
-        String pem = new String(Files.readAllBytes(Paths.get(path)));
-        pem = pem.replace("-----BEGIN PUBLIC KEY-----", "")
-                .replace("-----END PUBLIC KEY-----", "")
-                .replaceAll("\\s", "");
-
-        byte[] keyBytes = Base64.getDecoder().decode(pem);
-
-        X509EncodedKeySpec spec = new X509EncodedKeySpec(keyBytes);
-        KeyFactory kf = KeyFactory.getInstance("EC");
-        return kf.generatePublic(spec);
+    private X509Certificate loadCertificate(String path) throws Exception {
+        try (FileInputStream fis = new FileInputStream(path)) {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            return (X509Certificate) cf.generateCertificate(fis);
+        }
     }
 
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
-    try {
-        System.out.println("[Interceptor] Starting handshake");
+        try {
+            System.out.println("[Interceptor] Starting handshake");
 
-        // 1. Génération d'une paire de clés ECDH éphémère
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
-        kpg.initialize(256);
-        KeyPair keyPair = kpg.generateKeyPair();
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+            kpg.initialize(256);
+            KeyPair keyPair = kpg.generateKeyPair();
 
-        byte[] myECDHPublicKeyBytes = keyPair.getPublic().getEncoded();
-        String myECDHPublicKeyBase64 = Base64.getEncoder().encodeToString(myECDHPublicKeyBytes);
+            byte[] myECDHPublicKeyBytes = keyPair.getPublic().getEncoded();
+            String myECDHPublicKeyBase64 = Base64.getEncoder().encodeToString(myECDHPublicKeyBytes);
 
-        // 2. Signature de la clé publique ECDH avec la clé privée ECDSA long terme
-        Signature signature = Signature.getInstance("SHA256withECDSA");
-        signature.initSign(ecdsaPrivateKey);
-        signature.update(myECDHPublicKeyBytes);
-        byte[] signatureBytes = signature.sign();
-        String signatureBase64 = Base64.getEncoder().encodeToString(signatureBytes);
+            Signature sig = Signature.getInstance("SHA256withECDSA");
+            sig.initSign(ecdsaPrivateKey);
+            sig.update(myECDHPublicKeyBytes);
+            byte[] signatureBytes = sig.sign();
+            String signatureBase64 = Base64.getEncoder().encodeToString(signatureBytes);
 
-        // 3. Envoi de : clé_publique_ECDH : signature : clé_publique_ECDSA
-        String myECDSAPublicKeyBase64 = Base64.getEncoder().encodeToString(ecdsaPublicKey.getEncoded());
-        output.println(myECDHPublicKeyBase64 + ":" + signatureBase64 + ":" + myECDSAPublicKeyBase64);
+            String certBase64 = Base64.getEncoder().encodeToString(myCertificate.getEncoded());
 
-        // 4. Réception des données de l'autre client
-        String received = input.readLine();
-        String[] parts = received.split(":");
+            // Format : ecdhPub:signature:certificate
+            output.println(myECDHPublicKeyBase64 + ":" + signatureBase64 + ":" + certBase64);
 
-        String otherECDHPublicKeyBase64 = parts[0];
-        String otherSignatureBase64 = parts[1];
-        String otherECDSAPublicKeyBase64 = parts[2];
+            String received = input.readLine();
+            String[] parts = received.split(":", 3);
+            if (parts.length != 3) {
+                throw new IOException("MITM DETECTE : format de handshake invalide");
+            }
 
-        byte[] otherECDHPublicKeyBytes = Base64.getDecoder().decode(otherECDHPublicKeyBase64);
-        byte[] otherSignatureBytes = Base64.getDecoder().decode(otherSignatureBase64);
-        byte[] otherECDSAPublicKeyBytes = Base64.getDecoder().decode(otherECDSAPublicKeyBase64);
+            byte[] otherECDHPublicKeyBytes = Base64.getDecoder().decode(parts[0]);
+            byte[] otherSignatureBytes = Base64.getDecoder().decode(parts[1]);
+            byte[] otherCertBytes = Base64.getDecoder().decode(parts[2]);
 
-        // 5. Reconstruction de la clé publique ECDH de l'autre client
-        KeyFactory kf = KeyFactory.getInstance("EC");
+            X509Certificate otherCertificate;
+            try {
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                otherCertificate = (X509Certificate) cf.generateCertificate(
+                        new ByteArrayInputStream(otherCertBytes));
+            } catch (Exception e) {
+                throw new IOException("MITM DETECTE : certificat invalide ou falsifie");
+            }
 
-        X509EncodedKeySpec ecdhKeySpec = new X509EncodedKeySpec(otherECDHPublicKeyBytes);
-        PublicKey otherECDHPublicKey = kf.generatePublic(ecdhKeySpec);
+            try {
+                otherCertificate.checkValidity();
+                otherCertificate.verify(caCertificate.getPublicKey());
+            } catch (Exception e) {
+                throw new IOException("MITM DETECTE : certificat non signe par l'AC");
+            }
 
-        // 6. Reconstruction de la clé publique ECDSA de l'autre client
-        X509EncodedKeySpec ecdsaKeySpec = new X509EncodedKeySpec(otherECDSAPublicKeyBytes);
-        PublicKey otherECDSAPublicKey = kf.generatePublic(ecdsaKeySpec);
+            String identity = otherCertificate.getSubjectX500Principal().getName();
+            System.out.println("[Interceptor] Identite du client distant : " + identity);
 
-        // 7. Vérification de la signature
-        Signature verifySig = Signature.getInstance("SHA256withECDSA");
-        verifySig.initVerify(otherECDSAPublicKey);
-        verifySig.update(otherECDHPublicKeyBytes);
+            PublicKey otherECDSAPublicKey = otherCertificate.getPublicKey();
 
-        boolean valid = verifySig.verify(otherSignatureBytes);
+            Signature verifySig = Signature.getInstance("SHA256withECDSA");
+            verifySig.initVerify(otherECDSAPublicKey);
+            verifySig.update(otherECDHPublicKeyBytes);
 
-        if (!valid) {
-            throw new IOException("Invalid ECDH public key signature");
+            boolean valid = verifySig.verify(otherSignatureBytes);
+            if (!valid) {
+                throw new IOException("MITM DETECTE : signature de la cle ECDH invalide");
+            }
+
+            KeyFactory kf = KeyFactory.getInstance("EC");
+            X509EncodedKeySpec ecdhSpec = new X509EncodedKeySpec(otherECDHPublicKeyBytes);
+            PublicKey otherECDHPublicKey = kf.generatePublic(ecdhSpec);
+
+            KeyAgreement ka = KeyAgreement.getInstance("ECDH");
+            ka.init(keyPair.getPrivate());
+            ka.doPhase(otherECDHPublicKey, true);
+            byte[] sharedSecret = ka.generateSecret();
+
+            MessageDigest sha = MessageDigest.getInstance("SHA-256");
+            byte[] hash = sha.digest(sharedSecret);
+            byte[] keyBytes = Arrays.copyOf(hash, 16);
+            aesKey = new SecretKeySpec(keyBytes, "AES");
+
+            System.out.println("[Interceptor] Handshake complete!");
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("MITM DETECTE : echec du handshake");
         }
-
-        // 8. Calcul du secret partagé ECDH
-        KeyAgreement ka = KeyAgreement.getInstance("ECDH");
-        ka.init(keyPair.getPrivate());
-        ka.doPhase(otherECDHPublicKey, true);
-        byte[] sharedSecret = ka.generateSecret();
-
-        // 9. Dérivation de la clé AES-128
-        MessageDigest sha = MessageDigest.getInstance("SHA-256");
-        byte[] hash = sha.digest(sharedSecret);
-        byte[] keyBytes = Arrays.copyOf(hash, 16);
-        aesKey = new SecretKeySpec(keyBytes, "AES");
-
-        System.out.println("[Interceptor] Handshake complete!");
-    } catch (Exception e) {
-        throw new IOException("Handshake failed", e);
     }
-}
 
     public String beforeSend(String plainText) {
         try {
